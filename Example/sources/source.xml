@@ -1,0 +1,108 @@
+<!--
+    rowlength    can be specified as an integer number, but defaults to 'max'
+    split        specifies with which method rows should be split into columns
+                 "bulk" splits already at bulk insert time but imposes
+                 the limit that only one part can be present and only
+                 delimiter and size can be used.
+                 "regex" will read whole rows into a raw table and then perform
+                 the split using a CLR splitter, which allows for many parts in
+                 the same file, and pattern can be used to match the resulting
+                 column value.
+ -->
+<source name="%Source%" codepage="ACP" datafiletype="char" fieldterminator="\r\n" rowlength="1000" split="regex" firstrow="1">
+	<description>http://www.nyc.gov/html/nypd/html/traffic_reports/motor_vehicle_collision_data.shtml</description>
+    <part name="Collision" nulls="" typeCheck="false" keyCheck="true">
+        -- this matches the data rows
+        SELECT * from %System%_%Source%_Raw WHERE [row] LIKE '[0-9][0-9][0-9];%'
+        <term name="OccurrencePrecinctCode" delimiter=";" format="int"/>
+        <!-- only capture a part of the string -->
+        <term name="CollisionID" pattern="[0-9]{4}([0-9]{9})[^;]*;" format="int"/>
+        <term name="CollisionKey" delimiter=";" format="int"/>
+        <term name="CollisionOrder" delimiter=";" format="tinyint"/>
+        <term name="IntersectionAddress" delimiter=";" format="varchar(321)"/>
+        <term name="IntersectingStreet" delimiter=";" format="varchar(321)"/>
+        <term name="CrossStreet" delimiter=";" format="varchar(321)"/>
+        <term name="CollisionVehicleCount" delimiter=";" format="tinyint"/>
+        <term name="CollisionInjuredCount" delimiter=";" format="tinyint"/>
+        <term name="CollisionKilledCount" delimiter=";" format="tinyint"/>
+        <key name="measureTime" type="primary key">
+            <component of="IntersectingStreet"/>
+            <component of="CrossStreet"/>
+            <component of="CollisionOrder"/>
+        </key>
+    </part>
+    <part name="CollisionMetadata">
+        <!--
+            CHAR(183) is · (small bullet), which is rarely used so we can use it as our own
+            internal delimiter for the regex matching later. The select below builds a
+            concatenation of a number of rows.
+        -->
+        SELECT
+          *
+        FROM (
+          SELECT
+            _file,
+            MIN(_id) as _id,
+            MIN(_timestamp) as _timestamp
+          FROM (
+                    SELECT
+                        *
+                    FROM
+                        %System%_%Source%_Raw
+                    WHERE
+                        [row] NOT LIKE '[0-9][0-9][0-9];%'
+            ) src
+          GROUP BY
+            _file
+        ) f
+        CROSS APPLY (
+          SELECT
+            [row] + CHAR(183) AS [text()]
+          FROM (
+                    SELECT
+                        *
+                    FROM
+                        %System%_%Source%_Raw
+                    WHERE
+                        [row] NOT LIKE '[0-9][0-9][0-9];%'
+            ) src
+          WHERE
+            src._file = f._file
+          FOR XML PATH('')
+        ) c ([row])
+        <term name="month" pattern="(?=.*?(\w+)\s+[0-9]{4})?" format="varchar(42)"/>
+        <term name="year" pattern="(?=.*?\w+\s+([0-9]{4}))?" format="smallint"/>
+        <!--
+            calculations are persisted by default so they can be used in keys,
+            but that is only possible for deterministic calculations
+        -->
+        <calculation name="changedAt" format="date" persisted="false">
+            dateadd(day, -1,
+            dateadd(month, 1,
+            cast([year] as char(4)) +
+            case left([month], 3)
+                when 'Jan' then '01'
+                when 'Feb' then '02'
+                when 'Mar' then '03'
+                when 'Apr' then '04'
+                when 'May' then '05'
+                when 'Jun' then '06'
+                when 'Jul' then '07'
+                when 'Aug' then '08'
+                when 'Sep' then '09'
+                when 'Okt' then '10'
+                when 'Nov' then '11'
+                when 'Dec' then '12'
+            end +
+            '01'))
+        </calculation>
+        <!--
+            positive lookahead with an optional number of preceeding characters leading
+            up to the string to match, after which we capture everything. In the capture
+            we replace small bullets (formerly line breaks) with spaces.
+        -->
+        <term name="notes" pattern="(?=.*?NOTES[^:]*:(.*))?" format="varchar(max)">
+            LTRIM(REPLACE([notes], '·', ' '))
+        </term>
+    </part>
+</source>
